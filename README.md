@@ -1,148 +1,155 @@
 # Rithum
 
-**Rithum** (also referred to as `r1t-hum` or `rit-hum`) is a Raspberry Pi 5-based four-wheel mecanum rover. The project is being developed as a single-board-computer robot with local and remote manual control first, followed by sensor-assisted obstacle avoidance and autonomous operation in a later phase.
+Rithum is a Raspberry Pi 5-based mecanum rover project. Its software is designed around a central Python supervisor, independently managed worker processes, a safety-oriented operating-state manager, and a responsive control interface.
 
-Repository: <https://github.com/Siddharth-Balakrishnan/rithum>
+The project is being developed incrementally. Features documented as planned or reserved are not necessarily implemented.
 
-> **Project status:** early software foundation. Configuration loading, operating-state management, and their unit tests are present. The motion, sensor, vision, face, voice, web-control, and supervisor subsystems described in the architecture are design targets unless a source file implementing them has subsequently been added. Do not assume a feature is operational just because it appears in this documentation.
+## Project goals
 
-## Contents
+- Provide responsive manual control from a PC, mobile device, and the rover's local touchscreen.
+- Use a dedicated face renderer for expressions and visual feedback.
+- Add vision-based human detection and interaction.
+- Integrate voice/ Alexa-related commands through a controlled bridge.
+- Introduce IR-based obstacle detection and autonomous movement only after the manual-control milestone is complete.
+- Keep hardware access and operating-state authority centralized.
+- Keep the system lightweight and native to Ubuntu on Raspberry Pi.
 
-- [1. Project goals](#1-project-goals)
-- [2. Current implementation status](#2-current-implementation-status)
-- [3. Hardware at a glance](#3-hardware-at-a-glance)
-- [4. Software architecture](#4-software-architecture)
-- [5. Repository layout](#5-repository-layout)
-- [6. Documentation index](#6-documentation-index)
-- [7. Development environment](#7-development-environment)
-- [8. Quick start](#8-quick-start)
-- [9. Tests](#9-tests)
-- [10. Safety rules](#10-safety-rules)
-- [11. Debugging entry points](#11-debugging-entry-points)
-- [12. Project principles](#12-project-principles)
+## Hardware and platform
 
-## 1. Project goals
+Current target platform:
 
-Rithum is intended to provide:
+- Raspberry Pi 5 Model B, 8 GB RAM.
+- Ubuntu Server 26.10, ARM64.
+- Mecanum drive base with four motor channels.
+- Main battery and regulated power distribution for the rover electronics.
+- HDMI display during early development; intended 7-inch touchscreen later.
+- Camera for vision features.
+- Four IR obstacle sensors planned for the later autonomy phase.
 
-1. Four-wheel mecanum movement: forward, reverse, lateral, diagonal, and rotation.
-2. Manual control from a PC browser, a mobile browser, and the robot's local touchscreen.
-3. A local animated robot face, with a local touchscreen mode that can switch to the control interface.
-4. Human-presence and face-related interaction using a camera, introduced after the basic control path is stable.
-5. Alexa-assisted voice interaction, with robot-specific commands routed through an integration service.
-6. Four-direction obstacle sensing using IR sensors.
-7. A later autonomous mode, enabled only after the manual-control foundation and IR integration have been tested.
+Hardware interfaces and pin assignments must be confirmed against the actual components before enabling outputs. Motors remain disabled by default during software development.
 
-The rollout is deliberately staged. The initial movement implementation is **UI-controlled only**. IR-based autonomous movement must not be enabled before the designated autonomy phase is complete.
+## Architecture overview
 
-## 2. Current implementation status
+Rithum uses a single-board-computer architecture with native Linux processes. It does not require Docker or an additional microcontroller for the planned software architecture.
 
-The following reflects the repository state established during the initial software setup. Re-check the tree and tests before relying on this table after future changes.
+```text
+                   PC / Mobile / Local UI
+                            |
+                      Web Controller
+                            |
+                    Authenticated API
+                            |
+                     Core Supervisor
+                    /    |     |     \
+                   /     |     |      \
+             Motion   Face   Vision   Voice
+             Worker  Renderer Worker  Bridge
+                |       |       |       |
+           Hardware  Display  Camera  Alexa /
+            Layer                      Voice Events
+                   |
+              Diagnostics
+```
 
-| Area | Status | Notes |
+The supervisor is responsible for process lifecycle, message validation, operating-state coordination, and safety policy. Workers perform their assigned tasks but do not independently grant themselves authority or control sibling processes.
+
+### Core principles
+
+- The supervisor is the central process and state authority.
+- Hardware access is mediated through controlled interfaces.
+- Motors are disabled at boot.
+- Commands are validated before execution.
+- Manual movement requires an authorized operator and a live dead-man mechanism.
+- Autonomous operation remains disabled until the later IR integration phase.
+- Remote access must use authenticated application routes; raw motor interfaces are never exposed to the network.
+
+## Inter-process communication
+
+Local Rithum processes communicate using **JSON messages over Unix Domain Sockets (UDS)**.
+
+The protocol defines a common envelope containing:
+
+- Protocol version.
+- Unique message ID and optional correlation ID.
+- Sender sequence number.
+- Source and target component.
+- Message type and action.
+- Action-specific payload.
+- Optional metadata.
+- Raspberry Pi local timestamp with explicit UTC offset.
+
+Transport framing uses a four-byte unsigned big-endian length prefix followed by UTF-8 JSON bytes. This avoids relying on socket read boundaries, which are not message boundaries.
+
+The full protocol specification is maintained in:
+
+**[IPC Protocol](docs/IPC_PROTOCOL.md)**
+
+That document is the source of truth for message schemas, message types, action names, validation, authorization, response lifecycle, timestamps, transport framing, error handling, and implementation tests. Any code that sends or receives IPC messages must follow it.
+
+### Timestamp policy
+
+The Raspberry Pi's system clock is authoritative for internal message timestamps. Timestamps use ISO 8601 local time with milliseconds and an explicit UTC offset. The intended system timezone is `Asia/Kolkata`, but code must obtain the configured offset dynamically rather than hardcoding it.
+
+Monotonic clocks are used for timeouts, heartbeat expiry, and dead-man timing. Wall-clock timestamps are for human-readable records and audit logs, not safety timing.
+
+## Operating states
+
+The state manager defines these operating states:
+
+```text
+BOOT
+SELF_TEST
+IDLE
+MANUAL_LOCAL
+MANUAL_REMOTE
+AUTONOMOUS
+HUMAN_INTERACTION
+DIAGNOSTICS
+SAFE_STOP
+FAULT
+```
+
+`AUTONOMOUS` is disabled by default and must remain unavailable until the later autonomy milestone is completed and explicitly enabled.
+
+The state manager validates legal transitions and latches safety conditions. It does not directly operate GPIO or motor drivers; the supervisor and hardware safety layer must enforce the physical consequences of each transition.
+
+## Development phases
+
+The implementation is staged to keep the system testable and prevent premature hardware activation.
+
+| Phase | Scope | Status |
 |---|---|---|
-| Python project and virtual environment | Present | Python 3.14.8 was observed on the Raspberry Pi during setup. |
-| Configuration model | Implemented | `core/config.py`; environment-variable configuration and validation. |
-| Operating-state manager | Implemented | `core/state_manager.py`; validates state transitions and records history. |
-| Configuration tests | Implemented | `tests/test_config.py`. |
-| State-manager tests | Implemented | `tests/test_state_manager.py`. |
-| Supervisor/process lifecycle | Planned | Not part of the current verified implementation. |
-| Motor driver/GPIO integration | Planned | Motor outputs must remain disabled until the hardware layer is implemented and tested. |
-| Web controller and WebSocket API | Planned | PC, mobile, and local UI are design targets. |
-| IR obstacle sensing | Planned | Four sensors are intended; exact sensor model and wiring must be documented when selected. |
-| Autonomous navigation | Deferred | Must remain disabled until the IR integration phase is completed and validated. |
-| Camera/vision and human detection | Planned | No camera was detected in the recorded initial hardware inventory. |
-| Face renderer | Planned | Intended to use a lightweight native display stack, not a browser/Electron kiosk. |
-| Alexa integration | Planned | General Alexa interaction and robot-specific commands have different integration paths. |
-| systemd deployment | Planned | No production service unit should be assumed to exist yet. |
+| 1 | Repository foundation, configuration, state manager, initial tests, documentation | Foundation implemented; documentation should be reviewed against code. |
+| 2 | Core supervisor, worker lifecycle, IPC protocol, structured logging | Next implementation phase. |
+| 3 | Hardware abstraction and safety-controlled motor interface | Planned. |
+| 4 | Face renderer and display management | Planned. |
+| 5 | Web control interface, authentication, operator lease | Planned. |
+| 6 | Manual mecanum control, calibration, local/remote UI operation | Planned. |
+| 7 | IR obstacle detection, avoidance, and autonomous mode | Planned; only after Phase 6 works. |
+| Later | Human interaction, voice integration, extended diagnostics, full integration | Planned. |
 
-The test baseline recorded after the state-manager test correction was:
+Do not activate autonomous movement or connect IR sensors as active control inputs before Phase 6 is complete and the later sensor integration is deliberately started.
 
-```text
-Ran 23 tests
-OK
-```
+## Repository structure
 
-This is a historical baseline, not a guarantee that the current checkout still passes. Run the test command in [TESTING.md](docs/TESTING.md).
-
-## 3. Hardware at a glance
-
-The current bill of materials includes:
-
-| Component | Model / specification | Quantity | Intended role |
-|---|---|---:|---|
-| Single-board computer | Raspberry Pi 5, 8 GB | 1 | Main computer and control host |
-| DC geared motor | OG555, 12 V, 100 RPM | 4 | Wheel drive |
-| Motor driver | Cytron MDD10A, dual channel | 2 | Two motor channels per driver |
-| Mecanum wheels | 100 mm, 2 left + 2 right | 1 set | Omnidirectional movement |
-| Encoders | OE-37, two-channel Hall effect | 2 | Optional testing/feedback |
-| Main battery | 14.8 V nominal, 10 Ah, 4S Li-ion | 1 | Main robot power |
-| Charger | 16.8 V, 5 A, 4S Li-ion | 1 | Battery charging |
-| Voice assistant | Echo Dot 5th generation | 1 | Alexa voice interface |
-| Touchscreen | 7-inch, listed as 1200 × 700 | 1 | Local face/control display |
-| IR obstacle sensors | Four units, model TBD | 4 | Later obstacle detection/avoidance |
-| Camera | USB webcam, target budget ≤ ₹1,500 | 1 | Later vision/human detection |
-| Pi power source | Regulated USB-C supply/power bank | 1 | Pi power; display power budget must be considered separately |
-
-**Hardware data caveats:** the supplied BOM contains a battery configuration inconsistency: the product heading/link refers to 4S4P in one place while the detailed specification says 4S3P. Confirm the actual battery label and manufacturer data before calculating safe discharge current. The actual touchscreen model is not yet identified. Confirm its native resolution, touch interface, and power requirements before finalizing display setup.
-
-See [HARDWARE.md](docs/HARDWARE.md) for integration notes and unresolved items.
-
-## 4. Software architecture
-
-The intended design is a single Raspberry Pi host running native Linux processes. It does not require Docker or an additional microcontroller.
-
-High-level target:
-
-```text
-PC browser ─────┐
-Mobile browser ─┼── LAN / Tailscale / protected remote access
-Local touch UI ─┘                 │
-                                 ▼
-                         Web/API service
-                                 │
-                          authenticated IPC
-                                 │
-                                 ▼
-                       Python supervisor
-                                 │
-               ┌─────────────────┼─────────────────┐
-               ▼                 ▼                 ▼
-          State manager     Safety manager     Process manager
-               │                 │                 │
-               └─────────────────┼─────────────────┘
-                                 │
-        ┌──────────────┬─────────┼──────────┬──────────────┐
-        ▼              ▼         ▼          ▼              ▼
-     Motion          Vision     Face       Voice        Diagnostics
-        │              │        renderer    /Alexa
-        ▼              ▼
-   Motor drivers    Camera / IR sensors (IR later)
-```
-
-This is a target architecture, not a diagram of currently running services. The supervisor is intended to be the authority for operating modes, worker lifecycle, and safety interlocks. Web clients must never be given direct GPIO or raw motor-driver access.
-
-More detail: [ARCHITECTURE.md](docs/ARCHITECTURE.md).
-
-## 5. Repository layout
-
-The expected project layout is:
+The current project layout is expected to evolve as implementation proceeds.
 
 ```text
 rithum/
 ├── core/
 │   ├── __init__.py
 │   ├── config.py
-│   └── state_manager.py
-├── hardware/
-├── motion/
-├── vision/
+│   ├── state_manager.py
+│   └── supervisor.py              # planned
+├── hardware/                      # hardware abstraction
+├── motion/                        # mecanum motion control
+├── vision/                        # camera and detection workers
 ├── face/
 │   └── assets/
 │       ├── eyes/
 │       ├── mouths/
 │       └── expressions/
-├── voice/
+├── voice/                         # voice/Alexa bridge
 ├── web/
 │   ├── routes/
 │   └── static/
@@ -154,140 +161,116 @@ rithum/
 │   ├── data/
 │   └── logs/
 ├── config/
-├── scripts/
 ├── tests/
-│   ├── test_config.py
-│   └── test_state_manager.py
+├── scripts/
 ├── docs/
-├── .gitignore
+│   ├── ARCHITECTURE.md
+│   ├── CONFIGURATION.md
+│   ├── DEVELOPMENT.md
+│   ├── HARDWARE.md
+│   ├── IPC_PROTOCOL.md
+│   ├── PROJECT_OVERVIEW.md
+│   ├── ROADMAP.md
+│   ├── SAFETY.md
+│   ├── STATE_MACHINE.md
+│   ├── TESTING.md
+│   └── TROUBLESHOOTING.md
 ├── README.md
+├── CONTRIBUTING.md
+├── SECURITY.md
 ├── requirements.txt
-└── .venv/                 # local only; ignored by Git
+└── .gitignore
 ```
 
-Some directories are scaffolding for future subsystems and may be empty. An empty directory is not proof that its feature is implemented.
+A directory or file shown as planned may not exist yet.
 
-## 6. Documentation index
+## Software environment
 
-| File | Purpose | Read it when… |
-|---|---|---|
-| [`README.md`](README.md) | Project landing page, current status, setup entry points, and documentation index. | You are new to the repository. |
-| [`docs/PROJECT_OVERVIEW.md`](docs/PROJECT_OVERVIEW.md) | Goals, scope, operating principles, terminology, and implementation boundaries. | You need to understand what Rithum is supposed to do. |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Target subsystem architecture, process boundaries, IPC, ownership, and request flow. | You are adding a subsystem or tracing cross-module behavior. |
-| [`docs/STATE_MACHINE.md`](docs/STATE_MACHINE.md) | Operating states, legal transitions, latches, recovery paths, and state-manager API. | A mode change is rejected or the robot enters a stop/fault state. |
-| [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | Configuration sections, environment variables, defaults, validation, and safe configuration practice. | A setting is wrong or startup validation fails. |
-| [`docs/HARDWARE.md`](docs/HARDWARE.md) | BOM, subsystem allocation, electrical integration constraints, and hardware items still to verify. | You are wiring, replacing, or diagnosing hardware. |
-| [`docs/SAFETY.md`](docs/SAFETY.md) | Motor-output safety, emergency stop, power separation, remote-control safety, and autonomy gates. | You are changing anything that can move the rover or energize hardware. |
-| [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | Repository workflow, virtual environment, dependencies, code conventions, and change procedure. | You are setting up a development environment or contributing code. |
-| [`docs/TESTING.md`](docs/TESTING.md) | Test commands, test scope, expected baseline, and how to interpret failures. | You changed code or need to verify a checkout. |
-| [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | Symptom-led debugging checklist and useful Linux/Python commands. | Something fails and you need a repeatable diagnosis. |
-| [`docs/ROADMAP.md`](docs/ROADMAP.md) | Phase gates, implementation sequence, deferred autonomy, and completion criteria. | You need to decide what should be built next. |
-| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Branch, commit, review, documentation, and safety requirements for changes. | You are preparing a change for the repository. |
-| [`SECURITY.md`](SECURITY.md) | Credential handling, network exposure, authentication, and vulnerability reporting expectations. | You are configuring remote access or handling secrets. |
+The current development environment is:
 
-Keep this index synchronized whenever Markdown files are added, removed, or renamed.
+- Ubuntu Server 26.10, ARM64.
+- Python 3.14.
+- Python virtual environment at `.venv/`.
+- `gpiod` Python bindings using the libgpiod v2 API.
+- `unittest` for the current test suite.
 
-## 7. Development environment
+Use the project's virtual environment when installing or running Python dependencies.
 
-Recorded Raspberry Pi baseline during initial setup:
-
-- Board: Raspberry Pi 5 Model B, 8 GB.
-- OS: Ubuntu 26.10, 64-bit ARM (`aarch64`).
-- Kernel: `7.3.0-1004-raspi`.
-- Python: `3.14.8`.
-- Virtual environment: `.venv/`.
-- GPIO library/API: `gpiod` 2.6.0 / libgpiod v2 API was verified.
-- Graphics devices and `vc4`/`v3d` kernel modules were present.
-- No USB webcam or touchscreen was detected in the recorded inventory.
-- Network interfaces included Wi-Fi and Tailscale.
-
-These are time-specific observations. Use `uname -a`, `python --version`, `gpiodetect`, `lsusb`, and `ip -br address` to inspect the current machine.
-
-## 8. Quick start
-
-From the repository root:
+Activate it:
 
 ```bash
-cd ~/projects/rithum
-
-# Activate the existing virtual environment.
 source .venv/bin/activate
-
-# Inspect the project and current Git state.
-git status --short --branch
-
-# Print the validated application configuration.
-python -m core.config
-
-# Run all unit tests.
-python -m unittest discover -s tests -v
 ```
 
-If the virtual environment does not exist:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip setuptools wheel
-```
-
-Install project dependencies only after checking the current `requirements.txt`:
+Install Python dependencies:
 
 ```bash
 python -m pip install -r requirements.txt
 ```
 
-Do not install guessed dependencies or run the application as root unless a specific hardware permission requirement has been established. The current development session has been using the root account, but a dedicated unprivileged service/development account is preferable before deployment.
+Do not assume a dependency is required merely because it is common in other robotics projects. Keep the stack small and justify new packages.
 
-## 9. Tests
+## Running tests
 
-Run:
+From the repository root:
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-The verified initial baseline is 23 tests: 9 configuration tests and 14 state-manager tests. Tests should remain hardware-independent wherever possible. Unit tests must not energize motors, access real GPIO, or require the camera.
+Run the full test suite after changing configuration, state management, protocol schemas, supervisor behavior, or safety logic.
 
-See [TESTING.md](docs/TESTING.md).
+Tests must not require motor hardware unless they are explicitly marked as hardware-integration tests. Unit tests should use mocks or simulated interfaces.
 
-## 10. Safety rules
+## Configuration and safety defaults
 
-- Motor outputs must be disabled at boot.
-- Software state changes alone do not physically stop motors. The supervisor and hardware layer must enforce output disable.
-- A physical emergency-stop mechanism must interrupt motor power independently of the Pi software.
-- Never connect a 12 V signal or motor supply directly to a Raspberry Pi GPIO.
-- Verify the electrical output type of every sensor before connecting it to 3.3 V GPIO.
-- Do not expose raw motor-control endpoints to the Internet.
-- Remote control must use authentication, one active operator lease, heartbeat/dead-man behavior, and stop-on-disconnect.
-- Autonomy remains disabled until the IR integration phase is complete and validated.
-- Encoders are optional test instrumentation; they are not required to be continuously connected in the initial manual-control phase.
+The system must fail safe:
 
-Read [SAFETY.md](docs/SAFETY.md) before changing hardware or motion code.
+- Motors disabled at boot.
+- IR sensors disabled until the autonomy phase.
+- Autonomy disabled by default.
+- Web authentication required.
+- Web server bound to localhost by default until an explicit network deployment configuration is applied.
+- No direct public exposure of the IPC socket or motor interfaces.
+- Hardware faults and emergency-stop conditions take precedence over ordinary commands.
 
-## 11. Debugging entry points
+Do not weaken these defaults to make a test pass. Fix the test setup or implementation instead.
 
-Start with the narrowest relevant layer:
+## Documentation index
 
-1. **Configuration/startup:** run `python -m core.config`; inspect environment variables and validation errors.
-2. **State transitions:** inspect `core/state_manager.py`, then run `python -m unittest tests.test_state_manager -v` if package-style test invocation is supported; otherwise use discovery.
-3. **Regression:** run the complete test suite.
-4. **Hardware enumeration:** use `lsusb`, `v4l2-ctl --list-devices`, `gpiodetect`, `gpioinfo`, and `ls -l /dev/dri/`.
-5. **Linux services:** use `systemctl --failed`, `systemctl status <unit>`, and `journalctl -u <unit> -b`.
-6. **Network:** use `ip -br address`, `ip route`, `tailscale status`, and local socket inspection.
-7. **Git:** use `git status`, `git diff`, and `git log --oneline --decorate -10`.
+| Document | Purpose |
+|---|---|
+| [Architecture](docs/ARCHITECTURE.md) | Overall process and component architecture. |
+| [Configuration](docs/CONFIGURATION.md) | Configuration fields and environment overrides. |
+| [Development](docs/DEVELOPMENT.md) | Local development workflow and conventions. |
+| [Hardware](docs/HARDWARE.md) | Hardware assumptions, wiring, and interface notes. |
+| [IPC Protocol](docs/IPC_PROTOCOL.md) | JSON message schema, message types, actions, validation, transport, and response lifecycle. |
+| [Project Overview](docs/PROJECT_OVERVIEW.md) | Project goals and system overview. |
+| [Roadmap](docs/ROADMAP.md) | Phases and planned milestones. |
+| [Safety](docs/SAFETY.md) | Safety priorities, interlocks, and fail-safe behavior. |
+| [State Machine](docs/STATE_MACHINE.md) | Operating states and legal transitions. |
+| [Testing](docs/TESTING.md) | Test strategy and execution. |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | Common development and system issues. |
+| [Contributing](CONTRIBUTING.md) | Contribution and change expectations. |
+| [Security](SECURITY.md) | Security expectations and reporting. |
 
-Do not begin by changing multiple subsystems at once. Reproduce the issue, capture the relevant output, isolate the layer, make one change, and rerun the relevant tests.
+## Current verification
 
-## 12. Project principles
+At the time this README was prepared, the existing configuration and state-manager test suite contained **23 passing tests**. Re-run the test command above to verify the current checkout; do not treat a historical test result as proof that later changes still pass.
 
-- One Raspberry Pi is the primary compute and control platform.
-- Native Linux processes and `systemd` are preferred; Docker is not part of the current design.
-- No additional microcontroller is planned.
-- Python is the primary backend/control language.
-- FastAPI and a lightweight browser interface are the planned web-control approach; do not treat them as installed or implemented until the code exists.
-- Local and remote control must share the same validated command path.
-- The supervisor, not the browser, owns operating-mode decisions.
-- Safety behavior must fail closed: uncertain state means motors disabled.
-- Build and verify manual control before introducing autonomy.
-- Documentation must distinguish verified implementation from planned design.
+## Contributing
+
+Before implementing a new worker or subsystem:
+
+1. Read the architecture and relevant subsystem documentation.
+2. Define its responsibilities and authority boundaries.
+3. Define its IPC actions and payload schema in `docs/IPC_PROTOCOL.md` if it communicates across process boundaries.
+4. Add validation and tests before connecting real hardware.
+5. Keep safety defaults intact.
+6. Update documentation in the same change as behavior changes.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow.
+
+## License
+
+No license is declared here. Add a license file and update this section only after the repository owner has selected the project's license.
